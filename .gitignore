@@ -1,0 +1,42 @@
+# Node.js dependencies (npm install로 재생성 가능)
+node_modules/
+
+# Environment variables (API 키 등 보안 정보)
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs and debug files
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+*.log
+
+# Temporary files and caches
+.tmp
+temp/
+cache/
+
+# OS-specific files
+.DS_Store  # macOS
+Thumbs.db  # Windows
+*.swp      # Vim swap files
+
+# Build and dist folders (배포 시 생성)
+dist/
+build/
+
+# Editor/IDE settings (개인 환경)
+.vscode/
+.idea/
+*.sublime-*
+
+# Testing and coverage files (필요 시 ignore)
+coverage/
+tests/__snapshots__/
+
+# Project-specific ignores (챗봇 GUI 관련)
+# 예: 로컬 이미지 업로드나 캐시 파일
+uploads/
+local-cache/

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gemini Chatbot GUI</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        animation: spin 1s linear infinite;
+        display: none;
+    }
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    </style>
+
+</head>
+<body>
+  <ul id="messages"></ul>
+  <form id="form">
+    <input id="input" autocomplete="off" /><button>Send</button>
+  </form>
+  <script>
+    const socket = io();
+    const form = document.getElementById('form');
+    const input = document.getElementById('input');
+    const messages = document.getElementById('messages');
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (input.value) {
+        // 사용자 메시지 표시
+        const userItem = document.createElement('li');
+        userItem.textContent = 'You: ' + input.value;
+        messages.appendChild(userItem);
+        
+        socket.emit('chat message', input.value);
+        input.value = '';
+      }
+    });
+
+    // 응답 중 표시
+    socket.on('thinking', (msg) => {
+      const thinkingItem = document.createElement('li');
+      thinkingItem.textContent = msg;
+      thinkingItem.id = 'thinking';  // 나중에 제거/대체 위해 ID 추가
+      messages.appendChild(thinkingItem);
+    });
+
+    // 실제 응답 표시 (thinking 메시지 제거 후 추가)
+    socket.on('chat message', (msg) => {
+      const thinking = document.getElementById('thinking');
+      if (thinking) thinking.remove();  // 이전 thinking 메시지 제거
+      
+      const item = document.createElement('li');
+      item.textContent = 'Gemini: ' + msg;
+      messages.appendChild(item);
+    });
+
+    // 스크립트 부분에 추가
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner';
+    spinner.id = 'loading-spinner';
+    spinner.setAttribute('role', 'status');
+    spinner.setAttribute('aria-live', 'polite');
+    messages.appendChild(spinner);
+
+    socket.on('thinking', () => {
+    document.getElementById('loading-spinner').style.display = 'block';
+    });
+
+    socket.on('chat done', () => {
+    document.getElementById('loading-spinner').style.display = 'none';
+    });
+
+  </script>
+</body>
+</html>
