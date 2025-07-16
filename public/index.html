@@ -23,24 +23,41 @@
 <body>
   <ul id="messages"></ul>
   <form id="form">
-    <input id="input" autocomplete="off" /><button>Send</button>
+    <input id="input" autocomplete="off" placeholder="프롬프트 입력" />
+    <input type="file" id="image" accept="image/*" />  <!-- 이미지 선택 -->
+    <button>Send</button>
   </form>
   <script>
     const socket = io();
     const form = document.getElementById('form');
     const input = document.getElementById('input');
+    const imageInput = document.getElementById('image');
     const messages = document.getElementById('messages');
 
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (input.value) {
+      if (input.value || imageInput.files.length) {
+        let imagePath = null;
+
+        // 이미지 업로드 (있을 경우)
+        if (imageInput.files.length) {
+          const formData = new FormData();
+          formData.append('image', imageInput.files[0]);
+
+          const res = await fetch('/upload', { method: 'POST', body: formData });
+          const data = await res.json();
+          imagePath = data.imagePath;
+        }
+
         // 사용자 메시지 표시
         const userItem = document.createElement('li');
-        userItem.textContent = 'You: ' + input.value;
+        userItem.textContent = 'You: ' + (input.value || '이미지 분석 요청');
         messages.appendChild(userItem);
-        
-        socket.emit('chat message', input.value);
+
+        // 서버로 전송
+        socket.emit('chat message', { prompt: input.value, imagePath });
         input.value = '';
+        imageInput.value = '';  // 입력 초기화
       }
     });
 
