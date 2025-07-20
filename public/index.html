@@ -17,15 +17,34 @@
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
     }
-    </style>
+    toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #4CAF50;  /* 성공 색상 */
+      color: white;
+      padding: 10px 20px;
+      border-radius: 5px;
+      display: none;
+      z-index: 1000;
+    }
+    .toast.error {
+      background: #F44336;  /* 에러 색상 */
+    }
+  </style>
 
 </head>
 <body>
+  <div id="toast" class="toast"></div>
   <ul id="messages"></ul>
   <form id="form">
-    <input id="input" autocomplete="off" placeholder="프롬프트 입력" />
+    <input type="file" id="folder" webkitdirectory directory />  <!-- 폴더 선택 -->
+    <button onclick="selectFolder()">Load Folder</button>
+
     <input type="file" id="image" accept="image/*" />  <!-- 이미지 선택 -->
+    <input id="input" autocomplete="off" placeholder="프롬프트 입력" />
     <button>Send</button>
+
   </form>
   <script>
     const socket = io();
@@ -94,6 +113,42 @@
     socket.on('chat done', () => {
     document.getElementById('loading-spinner').style.display = 'none';
     });
+
+    function selectFolder() {
+      const folderInput = document.getElementById('folder');
+      if (folderInput.files.length) {
+        const rootFolder = folderInput.files[0].webkitRelativePath.split('/')[0];  // 루트 경로
+        socket.emit('select folder', rootFolder);
+      }
+    }
+
+    function showToast(message, isError = false) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.classList.toggle('error', isError);
+    toast.style.display = 'block';
+    setTimeout(() => { toast.style.display = 'none'; }, 3000);  // 3초 후 사라짐
+  }
+
+  // 이벤트 핸들러 추가
+  socket.on('context updated', (msg) => {
+    showToast(msg);  // 성공 리액션: "맥락이 로드되었습니다."
+    // 또는 채팅 목록에 추가: const item = document.createElement('li'); item.textContent = msg; messages.appendChild(item);
+  });
+
+  socket.on('error', (msg) => {
+    showToast(msg, true);  // 에러 리액션: "폴더 처리 오류: ..."
+  });
+
+  // selectFolder 함수 (기존)
+  function selectFolder() {
+    const folderInput = document.getElementById('folder');
+    if (folderInput.files.length) {
+      const rootFolder = folderInput.files[0].webkitRelativePath.split('/')[0];
+      socket.emit('select folder', rootFolder);
+    }
+  }
+
 
   </script>
 </body>
