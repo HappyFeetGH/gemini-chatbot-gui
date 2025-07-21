@@ -33,34 +33,35 @@ app.post('/upload', upload.single('image'), (req, res) => {
 const sessions = new Map();  // 사용자별 맥락 저장 (socket.id 키)
 
 io.on('connection', (socket) => {
-  sessions.set(socket.id, { context: '' });  // 초기화
+  sessions.set(socket.id, { context: new Map() });  // 초기화
 
   socket.on('select folder', async (rootFolder) => {
     try {
-      let newContext = '';
+      const contextMap = new Map();
 
-      // 재귀 스캔 함수 (하위 폴더 지원, 요약 통합)
       async function scanDir(dir) {
         const files = await fsExtra.readdir(dir, { withFileTypes: true });
         for (const file of files) {
           const filePath = path.join(dir, file.name);
           if (file.isDirectory()) {
-            await scanDir(filePath);  // 재귀
+            await scanDir(filePath);
           } else if (file.isFile()) {
             const ext = path.extname(filePath).toLowerCase();
+            let fileContent;
             if (['.pdf', '.xlsx', '.docx'].includes(ext)) {
-              newContext += await getFileSummaryFromGemini(filePath);  // gemini-cli로 요약
+              fileContent = await getFileSummaryFromGemini(filePath);
             } else {
-              newContext += await extractContext(filePath);  // 기존 로컬 추출
+              fileContent = await extractContext(filePath);
             }
+            contextMap.set(file.name, fileContent);  // 파일명 키로 저장
           }
         }
       }
 
       await scanDir(rootFolder);
 
-      sessions.get(socket.id).context = newContext;
-      console.log('Context loaded:', newContext.substring(0, 200));  // 디버그 로그
+      sessions.get(socket.id).context = contextMap;
+      console.log('Context loaded:', Array.from(contextMap.keys()));  // 디버그: 파일 목록 로그
       socket.emit('context updated', '맥락이 로드되었습니다.');
     } catch (err) {
       socket.emit('error', '폴더 처리 오류: ' + err.message);
@@ -70,8 +71,18 @@ io.on('connection', (socket) => {
 
   socket.on('chat message', ({ prompt, imagePath }) => {  // 이미지 경로 포함 수신
     const session = sessions.get(socket.id);
-    let fullPrompt = session.context + '\n' + prompt;
+    let fullPrompt = '아래 맥락을 기반으로 답변하세요. 특정 파일을 참조할 때는 해당 파일 내용을 우선적으로 사용하세요:\n';
     
+    session.context.forEach((content, fileName) => {
+      if (prompt.includes(fileName)) {  // 질문에 파일명 포함 시 강조
+        fullPrompt += `파일 ${fileName} (강조): ${content}\n`;
+      } else {
+        fullPrompt += `파일 ${fileName}: ${content.substring(0, 500)}...\n`;  // 전체 맥락 요약
+      }
+    });
+
+    fullPrompt += '\n사용자 질문: ' + prompt;    
+
     socket.emit('thinking');  // 로딩 스피너 시작 (이전 기능 참조)
 
     if (imagePath) {      
