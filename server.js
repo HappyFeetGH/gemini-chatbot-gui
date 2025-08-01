@@ -320,23 +320,21 @@ io.on('connection', (socket) => {
         if (imagePath) fs.unlinkSync(imagePath);
       } else {
         socket.emit('chat message', 'Error: gemini-cli failed with code ' + code);
-      }
-      // Space 저장 (files는 실제 파일 목록으로 업데이트 필요, 여기서는 예시)
-      saveSpace(currentSpace.get(socket.id) || 'default', { files: [], history });
+      }      
+      
+      saveSpace(currentSpace.get(socket.id) || 'default', { files: spaceData.files, history });
+
     });
   });
 
   socket.on('switch space', (spaceName) => {
     currentSpace.set(socket.id, spaceName);
     const spaceData = loadSpace(spaceName);
-    
-    // 이전 히스토리 클리어 및 새 Space 히스토리 로드
     sessionHistories.set(socket.id, spaceData.history || []);
     console.log(`Switched ${socket.id} to ${spaceName}: History reset to ${spaceData.history.length} items`);
-    
-    // 클라이언트에 전환 확인 및 파일 목록 전송
-    socket.emit('space switched', { name: spaceName, files: spaceData.files });
+    socket.emit('space switched', { name: spaceName, files: spaceData.files, history: spaceData.history });  // 히스토리 전송 추가
   });
+
 
   socket.on('list spaces', () => {
     socket.emit('space list', getSpaceList());
