@@ -3,6 +3,7 @@
 <head>
   <title>Gemini Chatbot GUI</title>
   <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     .spinner {
         border: 4px solid #f3f3f3;
@@ -18,7 +19,7 @@
         100% { transform: rotate(360deg); }
     }
     </style>
-
+  
 </head>
 <body>
   <ul id="messages"></ul>
@@ -29,72 +30,125 @@
   </form>
   <script>
     const socket = io();
-    const form = document.getElementById('form');
-    const input = document.getElementById('input');
-    const imageInput = document.getElementById('image');
     const messages = document.getElementById('messages');
 
-    form.addEventListener('submit', async (e) => {
+    // Space 선택 UI (기존)
+    const spaceSelect = document.createElement('select');
+    spaceSelect.id = 'spaceSelect';
+    document.body.appendChild(spaceSelect);
+
+    // Space 목록 업데이트 함수 (기존)
+    function updateSpaceSelect(spaces) {
+      spaceSelect.innerHTML = spaces.map(s => `<option value="${s}">${s}</option>`).join('');
+      if (!spaces.includes(spaceSelect.value)) spaceSelect.value = spaces[0] || 'default';
+    }
+
+    // 초기 목록 요청 및 이벤트 (기존)
+    socket.on('connect', () => socket.emit('list spaces'));
+    socket.on('space list', updateSpaceSelect);
+
+    // Add/Delete Space 버튼 (기존)
+    const addBtn = document.createElement('button');
+    addBtn.textContent = 'Add Space';
+    addBtn.onclick = () => {
+      const newSpace = prompt('New Space name?');
+      if (newSpace) socket.emit('add space', newSpace);
+    };
+    document.body.appendChild(addBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = 'Delete Current Space';
+    delBtn.onclick = () => {
+      if (confirm(`Delete ${spaceSelect.value}?`)) socket.emit('delete space', spaceSelect.value);
+    };
+    document.body.appendChild(delBtn);
+
+    // Space 전환 이벤트 (기존)
+    spaceSelect.addEventListener('change', () => socket.emit('switch space', spaceSelect.value));
+    socket.on('space switched', (data) => console.log('Switched to', data.name));
+
+    // 1. Space에 영향을 주는 파일 업로드 Form (새로 분리: Context 파일)
+    const contextForm = document.createElement('form');
+    const contextInput = document.createElement('input');
+    contextInput.type = 'file';
+    contextInput.accept = '.pdf,.csv,.xlsx,.docx,.hwpx,.txt,.md';  // 지원 확장자 제한
+    const extractBtn = document.createElement('button');
+    extractBtn.textContent = 'Upload & Extract to Space';
+    contextForm.appendChild(contextInput);
+    contextForm.appendChild(extractBtn);
+    document.body.appendChild(contextForm);
+
+    extractBtn.onclick = (e) => {
       e.preventDefault();
-      if (input.value || imageInput.files.length) {
+      if (contextInput.files.length) {
+        const formData = new FormData();
+        formData.append('file', contextInput.files[0]);
+        formData.append('space', spaceSelect.value);
+        fetch('/upload-context', { method: 'POST', body: formData }).then(() => {
+          socket.emit('extract context', spaceSelect.value);  // 서버에 추출 요청
+          console.log('Extraction triggered for space:', spaceSelect.value);
+        });
+      }
+    };
+
+    // 2. 쿼리에 영향을 주는 파일 Form (기존: 이미지 등 즉시 쿼리용)
+    const queryForm = document.getElementById('form');  // 기존 form 사용
+    const queryInput = document.getElementById('input');
+    const queryImageInput = document.getElementById('image');
+    const querySubmitBtn = queryForm.querySelector('button');
+
+    queryForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (queryInput.value || queryImageInput.files.length) {
         let imagePath = null;
-
-        // 이미지 업로드 (있을 경우)
-        if (imageInput.files.length) {
+        if (queryImageInput.files.length) {
           const formData = new FormData();
-          formData.append('image', imageInput.files[0]);
-
+          formData.append('image', queryImageInput.files[0]);
           const res = await fetch('/upload', { method: 'POST', body: formData });
           const data = await res.json();
           imagePath = data.imagePath;
         }
-
-        // 사용자 메시지 표시
         const userItem = document.createElement('li');
-        userItem.textContent = 'You: ' + (input.value || '이미지 분석 요청');
+        userItem.textContent = 'You: ' + (queryInput.value || '이미지 분석 요청');
         messages.appendChild(userItem);
-
-        // 서버로 전송
-        socket.emit('chat message', { prompt: input.value, imagePath });
-        input.value = '';
-        imageInput.value = '';  // 입력 초기화
+        socket.emit('chat message', { prompt: queryInput.value, imagePath });
+        queryInput.value = '';
+        queryImageInput.value = '';
       }
     });
 
-    // 응답 중 표시
-    socket.on('thinking', (msg) => {
-      const thinkingItem = document.createElement('li');
-      thinkingItem.textContent = msg;
-      thinkingItem.id = 'thinking';  // 나중에 제거/대체 위해 ID 추가
-      messages.appendChild(thinkingItem);
+    // 파일 목록 UI (기존)
+    const fileList = document.createElement('ul');
+    document.body.appendChild(fileList);
+    socket.on('file list', files => {
+      fileList.innerHTML = files.map(f => `<li>${f} <button onclick="socket.emit('delete file', {spaceName: spaceSelect.value, fileName: '${f}'});">Delete</button></li>`).join('');
     });
 
-    // 실제 응답 표시 (thinking 메시지 제거 후 추가)
+    // 응답 처리 (기존, Markdown 포함)
+    socket.on('thinking', () => document.getElementById('loading-spinner').style.display = 'block');
+    socket.on('chat done', () => document.getElementById('loading-spinner').style.display = 'none');
+
     socket.on('chat message', (msg) => {
       const thinking = document.getElementById('thinking');
-      if (thinking) thinking.remove();  // 이전 thinking 메시지 제거
-      
+      if (thinking) thinking.remove();
       const item = document.createElement('li');
-      item.textContent = 'Gemini: ' + msg;
+      item.innerHTML = marked.parse('Gemini: ' + msg);
       messages.appendChild(item);
+      scrollToBottom();
     });
 
-    // 스크립트 부분에 추가
+    // 스크롤 함수 (기존)
+    function scrollToBottom() {
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // 스피너 (기존)
     const spinner = document.createElement('div');
     spinner.className = 'spinner';
     spinner.id = 'loading-spinner';
-    spinner.setAttribute('role', 'status');
-    spinner.setAttribute('aria-live', 'polite');
+    spinner.style.display = 'none';
     messages.appendChild(spinner);
-
-    socket.on('thinking', () => {
-    document.getElementById('loading-spinner').style.display = 'block';
-    });
-
-    socket.on('chat done', () => {
-    document.getElementById('loading-spinner').style.display = 'none';
-    });
-
   </script>
+
 </body>
 </html>
