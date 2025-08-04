@@ -18,11 +18,40 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 // 업로드 설정
+// 업로드 설정 (한글 인코딩 개선)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+  filename: (req, file, cb) => {
+    // 한글 파일명 UTF-8 디코딩 처리
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    cb(null, Date.now() + '_' + originalName);
+  }
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  fileFilter: (req, file, cb) => {
+    // 한글 파일명 UTF-8 처리
+    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    cb(null, true);
+  }
+});
+
+// Context 파일 전용 storage 추가
+const contextStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => {
+    // 한글 파일명 UTF-8 디코딩 처리
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    cb(null, Date.now() + '_' + originalName);
+  }
+});
+const contextUpload = multer({ 
+  storage: contextStorage,
+  fileFilter: (req, file, cb) => {
+    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    cb(null, true);
+  }
+});
 
 // 정적 파일 서빙
 app.use(express.static('public'));
@@ -30,8 +59,11 @@ app.use(express.static('public'));
 // 이미지 업로드 라우트
 app.post('/upload', upload.single('image'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
-  res.json({ imagePath: req.file.path });
+  const originalFileName = req.file.originalname;
+  console.log(`✓ Image uploaded: ${originalFileName}`);
+  res.json({ imagePath: req.file.path, fileName: originalFileName });
 });
+
 
 app.post('/upload-file', upload.single('file'), (req, res) => {
   const spaceName = req.body.space || 'default';
@@ -163,42 +195,89 @@ function tableToMarkdown(tableData) {
 
 // 서버 시작 시 ./context 폴더 스캔 및 추출 함수 (확장자별 최적화)
 async function extractContextFiles(spaceName = 'default') {
+  console.log(`🔄 Starting extraction for space: ${spaceName}`);
+  
   const contextDir = path.join(__dirname, 'context', spaceName);
-  if (!fs.existsSync(contextDir)) return;
+  const spaceExtractedDir = path.join(contextDir, 'extracted');
+  
+  console.log(`📂 Context directory: ${contextDir}`);
+  
+  if (!fs.existsSync(contextDir)) {
+    console.log(`❌ No context directory for space: ${spaceName}`);
+    return;
+  }
+  
+  if (!fs.existsSync(spaceExtractedDir)) {
+    fs.mkdirSync(spaceExtractedDir, { recursive: true });
+    console.log(`✓ Created extracted directory: ${spaceExtractedDir}`);
+  }
 
-  const files = fs.readdirSync(contextDir);
-  for (const file of files) {
+  let files;
+  try {
+    files = fs.readdirSync(contextDir);
+  } catch (err) {
+    console.error(`❌ Cannot read directory ${contextDir}: ${err.message}`);
+    return;
+  }
+  
+  const filesToProcess = files.filter(file => {
     const filePath = path.join(contextDir, file);
-    if (!fs.statSync(filePath).isFile()) continue;  // 파일만 처리
-
+    try {
+      const stat = fs.statSync(filePath);
+      return stat.isFile() && file !== 'extracted';
+    } catch (err) {
+      console.error(`⚠️  Cannot stat file ${filePath}: ${err.message}`);
+      return false;
+    }
+  });
+  
+  if (filesToProcess.length === 0) {
+    console.log(`ℹ️  No files to extract in space: ${spaceName}`);
+    return;
+  }
+  
+  console.log(`📁 Found ${filesToProcess.length} files to process in ${spaceName}:`, filesToProcess);
+  
+  for (const file of filesToProcess) {
+    const filePath = path.join(contextDir, file);
     const ext = path.extname(file).toLowerCase();
-    const extractedPath = path.join(extractedDir, `${path.basename(file, ext)}_extracted.txt`);
+    const extractedPath = path.join(spaceExtractedDir, `${path.basename(file, ext)}_extracted.txt`);
+
+    console.log(`🔍 Processing: ${file} (${ext})`);
+    console.log(`📍 Full path: ${filePath}`);
+    
+    // 파일 존재 확인
+    if (!fs.existsSync(filePath)) {
+      console.error(`❌ File not found: ${filePath}`);
+      continue;
+    }
 
     try {
       if (['.txt', '.md'].includes(ext)) {
         fs.copyFileSync(filePath, extractedPath);
-        console.log(`Copied text file: ${file}`);
+        console.log(`✅ Extracted text file: ${file}`);
       } else if (ext === '.pdf') {
         const dataBuffer = fs.readFileSync(filePath);
         const data = await pdfParse(dataBuffer);
         fs.writeFileSync(extractedPath, data.text, 'utf-8');
-        console.log(`Extracted PDF: ${file}`);
+        console.log(`✅ Extracted PDF: ${file}`);
       } else if (['.jpg', '.png', '.jpeg'].includes(ext)) {
         const metadata = await sharp(filePath).metadata();
         const text = `Image: ${file}\nDimensions: ${metadata.width}x${metadata.height}\nFormat: ${metadata.format}`;
         fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`Extracted Image: ${file}`);
+        console.log(`✅ Extracted Image: ${file}`);
       } else if (ext === '.csv') {
         let rows = [];
-        await new Promise(resolve => {
+        await new Promise((resolve, reject) => {
           fs.createReadStream(filePath)
             .pipe(csvParser())
             .on('data', row => rows.push(row))
-            .on('end', resolve);
+            .on('end', resolve)
+            .on('error', reject);
         });
         const text = tableToMarkdown(rows);
         fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`Extracted CSV: ${file}`);
+        console.log(`✅ Extracted CSV: ${file}`);
       } else if (ext === '.xlsx') {
         const workbook = XLSX.readFile(filePath);
         let text = '';
@@ -207,21 +286,28 @@ async function extractContextFiles(spaceName = 'default') {
           text += `Sheet: ${sheetName}\n${sheet}\n\n`;
         });
         fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`Extracted XLSX: ${file}`);
+        console.log(`✅ Extracted XLSX: ${file}`);
       } else if (ext === '.docx') {
         const result = await mammoth.convertToMarkdown({ path: filePath });
         fs.writeFileSync(extractedPath, result.value, 'utf-8');
-        console.log(`Extracted DOCX: ${file}`);
+        console.log(`✅ Extracted DOCX: ${file}`);
       } else if (ext === '.hwpx') {
-        await extractHwpx(filePath, extractedPath);  // hwpx専用 함수 호출
+        await extractHwpx(filePath, extractedPath);
+        console.log(`✅ Extracted HWPX: ${file}`);
       } else {
-        console.log(`Skipping unsupported extension: ${file} (${ext})`);
+        console.log(`⚠️  Skipping unsupported: ${file} (${ext})`);
       }
     } catch (err) {
-      console.error(`Extract error for ${file}: ${err.message}`);
+      console.error(`❌ Extract error for ${file}: ${err.message}`);
+      console.error(`📍 Error details:`, err);
     }
   }
+  
+  console.log(`🎉 Extraction completed for space: ${spaceName}`);
 }
+
+
+
 
 // 서버 시작 직후 추출 실행
 (async () => {
@@ -320,38 +406,86 @@ io.on('connection', (socket) => {
         if (imagePath) fs.unlinkSync(imagePath);
       } else {
         socket.emit('chat message', 'Error: gemini-cli failed with code ' + code);
-      }      
+      }
       
-      saveSpace(currentSpace.get(socket.id) || 'default', { files: spaceData.files, history });
-
+      // 수정: 현재 Space 데이터를 다시 로드해서 저장
+      const currentSpaceName = currentSpace.get(socket.id) || 'default';
+      const currentSpaceData = loadSpace(currentSpaceName);
+      saveSpace(currentSpaceName, { 
+        files: currentSpaceData.files || [], 
+        history: history 
+      });
     });
+
   });
 
-  socket.on('switch space', (spaceName) => {
+  socket.on('switch space', async (spaceName) => {
     currentSpace.set(socket.id, spaceName);
     const spaceData = loadSpace(spaceName);
     sessionHistories.set(socket.id, spaceData.history || []);
-    console.log(`Switched ${socket.id} to ${spaceName}: History reset to ${spaceData.history.length} items`);
-    socket.emit('space switched', { name: spaceName, files: spaceData.files, history: spaceData.history });  // 히스토리 전송 추가
+    console.log(`Switched ${socket.id} to ${spaceName}: History reset to ${(spaceData.history || []).length} items`);
+    
+    // Space 전환 시 자동 Extract 실행 (파일이 있으면)
+    const spaceContextDir = path.join(__dirname, 'context', spaceName);
+    if (fs.existsSync(spaceContextDir)) {
+      try {
+        await extractContextFiles(spaceName);
+        console.log(`Auto-extraction completed for space: ${spaceName}`);
+      } catch (err) {
+        console.error(`Auto-extraction failed for ${spaceName}: ${err.message}`);
+      }
+    }
+    
+    socket.emit('space switched', { 
+      name: spaceName, 
+      files: spaceData.files || [], 
+      history: spaceData.history || [] 
+    });
   });
+
 
 
   socket.on('list spaces', () => {
     socket.emit('space list', getSpaceList());
   });
 
-  socket.on('add space', (spaceName) => {
+  socket.on('add space', async (spaceName) => {
     if (spaceName) {
       saveSpace(spaceName, { files: [], history: [] });
-      io.emit('space list', getSpaceList());  // 모든 클라이언트에 업데이트 푸시
+      
+      // 새 Space 생성 후 자동 Extract 실행
+      try {
+        await extractContextFiles(spaceName);
+        console.log(`Auto-extraction completed for new space: ${spaceName}`);
+      } catch (err) {
+        console.error(`Auto-extraction failed for ${spaceName}: ${err.message}`);
+      }
+      
+      io.emit('space list', getSpaceList());
     }
   });
 
   socket.on('delete space', (spaceName) => {
+    if (spaceName === 'default') {
+      socket.emit('error', 'Cannot delete default space');
+      return;
+    }
+    
+    // JSON 파일 삭제
     const spacePath = path.join(spacesDir, `${spaceName}.json`);
     if (fs.existsSync(spacePath)) fs.unlinkSync(spacePath);
-    io.emit('space list', getSpaceList());  // 업데이트 푸시
+    
+    // 해당 Space의 context 폴더 전체 삭제
+    const spaceContextDir = path.join(__dirname, 'context', spaceName);
+    if (fs.existsSync(spaceContextDir)) {
+      fs.rmSync(spaceContextDir, { recursive: true, force: true });
+      console.log(`Deleted space folder: ${spaceContextDir}`);
+    }
+    
+    io.emit('space list', getSpaceList());
+    console.log(`Space ${spaceName} completely deleted`);
   });
+
 
   socket.on('list files', (spaceName) => {
     const spaceData = loadSpace(spaceName);
@@ -365,19 +499,85 @@ io.on('connection', (socket) => {
     socket.emit('file deleted', fileName);
   });
 
-  app.post('/upload-context', upload.single('file'), (req, res) => {
+ app.post('/upload-context', contextUpload.single('file'), async (req, res) => {
+  try {
     const spaceName = req.body.space || 'default';
     const spaceContextDir = path.join(__dirname, 'context', spaceName);
-    if (!fs.existsSync(spaceContextDir)) fs.mkdirSync(spaceContextDir, { recursive: true });
-    const filePath = path.join(spaceContextDir, req.file.originalname);
-    fs.renameSync(req.file.path, filePath);
-    res.json({ success: true });
-  });
+    
+    console.log(`📤 Upload request for space: ${spaceName}`);
+    console.log(`📂 Target directory: ${spaceContextDir}`);
+    
+    if (!fs.existsSync(spaceContextDir)) {
+      fs.mkdirSync(spaceContextDir, { recursive: true });
+      console.log(`✓ Created directory: ${spaceContextDir}`);
+    }
+    
+    // 한글 파일명으로 최종 경로 설정
+    const originalFileName = req.file.originalname;
+    const finalPath = path.join(spaceContextDir, originalFileName);
+    
+    console.log(`📋 Original filename: ${originalFileName}`);
+    console.log(`📍 Temp file: ${req.file.path}`);
+    console.log(`📍 Final path: ${finalPath}`);
+    
+    // 업로드된 임시 파일을 최종 위치로 이동
+    fs.renameSync(req.file.path, finalPath);
+    console.log(`✓ File moved: ${originalFileName} to space: ${spaceName}`);
+    
+    // 파일 존재 확인
+    if (!fs.existsSync(finalPath)) {
+      throw new Error(`File was not created at expected location: ${finalPath}`);
+    }
+    
+    // Space 데이터에 파일 목록 업데이트
+    const spaceData = loadSpace(spaceName);
+    if (!spaceData.files.includes(originalFileName)) {
+      spaceData.files.push(originalFileName);
+      saveSpace(spaceName, spaceData);
+      console.log(`✓ File list updated for space: ${spaceName}`);
+    }
+    
+    // 잠시 대기 (파일 시스템 동기화)
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // 파일 업로드 후 즉시 Extract 실행
+    console.log(`🔄 Starting auto-extraction for space: ${spaceName}`);
+    await extractContextFiles(spaceName);
+    console.log(`✓ Auto-extraction completed for space: ${spaceName}`);
+    
+    res.json({ 
+      success: true, 
+      extracted: true, 
+      fileName: originalFileName,
+      message: 'File uploaded and extracted successfully' 
+    });
+    
+  } catch (err) {
+    console.error(`❌ Upload/Extract error: ${err.message}`);
+    console.error(`📍 Error stack:`, err.stack);
+    res.status(500).json({ 
+      success: false, 
+      extracted: false, 
+      error: err.message 
+    });
+  }
+});
+
+
+
+
 
   socket.on('extract context', async (spaceName) => {
-    await extractContextFiles(spaceName);  // Space별 추출 (함수 수정 필요, 아래 참조)
-    socket.emit('extraction done', spaceName);
+    try {
+      await extractContextFiles(spaceName);
+      socket.emit('extraction done', spaceName);
+      console.log(`Manual extraction completed for space: ${spaceName}`);
+    } catch (err) {
+      console.error(`Manual extraction failed for ${spaceName}: ${err.message}`);
+      socket.emit('extraction error', err.message);
+    }
   });
+
 
 
 

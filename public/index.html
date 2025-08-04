@@ -18,6 +18,16 @@
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
     }
+
+    /* Context 섹션 스타일링 */
+    button:hover {
+      opacity: 0.8;
+    }
+    
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     </style>
   
 </head>
@@ -67,6 +77,36 @@
   };
   document.body.insertBefore(delBtn, form);
 
+  // Context 파일 업로드 Form (Space에 영향을 주는 파일)
+  const contextForm = document.createElement('form');
+  contextForm.style.border = '1px solid #ccc';
+  contextForm.style.padding = '10px';
+  contextForm.style.margin = '10px 0';
+
+  const contextLabel = document.createElement('label');
+  contextLabel.textContent = 'Context 파일 업로드 (Space에 추가): ';
+  contextForm.appendChild(contextLabel);
+
+  const contextInput = document.createElement('input');
+  contextInput.type = 'file';
+  contextInput.accept = '.pdf,.csv,.xlsx,.docx,.hwpx,.txt,.md';
+  contextInput.style.margin = '5px';
+  contextForm.appendChild(contextInput);
+
+  const extractBtn = document.createElement('button');
+  extractBtn.type = 'button';
+  extractBtn.textContent = 'Upload & Extract to Space';
+  extractBtn.style.margin = '5px';
+  extractBtn.style.backgroundColor = '#4CAF50';
+  extractBtn.style.color = 'white';
+  extractBtn.style.border = 'none';
+  extractBtn.style.padding = '8px 16px';
+  extractBtn.style.cursor = 'pointer';
+  contextForm.appendChild(extractBtn);
+
+  document.body.insertBefore(contextForm, form);
+
+
   // Space 전환 이벤트 (히스토리 로드 및 UI 업데이트 추가)
   spaceSelect.addEventListener('change', () => socket.emit('switch space', spaceSelect.value));
   socket.on('space switched', (data) => {
@@ -83,15 +123,60 @@
   });
 
   // 파일 업로드 버튼 추가 (기존)
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  document.body.appendChild(fileInput);
-  fileInput.addEventListener('change', () => {
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
-    formData.append('space', spaceSelect.value);
-    fetch('/upload-file', { method: 'POST', body: formData });
-  });
+  // Context 파일 업로드 및 Extract 버튼 이벤트
+  extractBtn.onclick = (e) => {
+    e.preventDefault();
+    if (contextInput.files.length) {
+      const fileName = contextInput.files[0].name;
+      extractBtn.textContent = `Uploading ${fileName}...`;
+      extractBtn.disabled = true;
+      extractBtn.style.backgroundColor = '#999';
+      
+      const formData = new FormData();
+      formData.append('file', contextInput.files[0]);
+      formData.append('space', spaceSelect.value);
+      
+      fetch('/upload-context', { method: 'POST', body: formData })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success && data.extracted) {
+            console.log(`✅ ${data.fileName} uploaded and extracted successfully`);
+            alert(`파일 업로드 및 추출 완료: ${data.fileName}`);
+            // 파일 목록 새로고침
+            socket.emit('list files', spaceSelect.value);
+          } else {
+            console.error('Upload/Extract failed:', data.error);
+            alert(`업로드 실패: ${data.error || '알 수 없는 오류'}`);
+          }
+          extractBtn.textContent = 'Upload & Extract to Space';
+          extractBtn.disabled = false;
+          extractBtn.style.backgroundColor = '#4CAF50';
+          contextInput.value = '';
+        })
+        .catch(err => {
+          console.error('Upload error:', err);
+          alert('업로드 중 오류가 발생했습니다.');
+          extractBtn.textContent = 'Upload & Extract to Space';
+          extractBtn.disabled = false;
+          extractBtn.style.backgroundColor = '#4CAF50';
+        });
+    } else {
+      alert('파일을 선택해주세요.');
+    }
+  };
+
+
+  // 파일 목록 새로고침 버튼
+  const refreshBtn = document.createElement('button');
+  refreshBtn.textContent = 'Refresh File List';
+  refreshBtn.onclick = () => socket.emit('list files', spaceSelect.value);
+  refreshBtn.style.margin = '5px';
+  document.body.appendChild(refreshBtn);
+
+  // 파일 목록 제목
+  const fileListTitle = document.createElement('h4');
+  fileListTitle.textContent = 'Context Files in Current Space:';
+  document.body.appendChild(fileListTitle);
 
   // 파일 목록 UI (기존)
   const fileList = document.createElement('ul');
@@ -119,6 +204,7 @@
       const userItem = document.createElement('li');
       userItem.textContent = 'You: ' + (input.value || '이미지 분석 요청');
       messages.appendChild(userItem);
+      scrollToBottom(); // 여기에 추가
 
       // 서버로 전송
       socket.emit('chat message', { prompt: input.value, imagePath });
@@ -126,6 +212,7 @@
       imageInput.value = '';  // 입력 초기화
     }
   });
+
 
   // 응답 중 표시
   socket.on('thinking', (msg) => {
@@ -143,7 +230,9 @@
     const item = document.createElement('li');
     item.innerHTML = marked.parse('Gemini: ' + msg);
     messages.appendChild(item);
+    scrollToBottom(); // 여기에 추가
   });
+
 
   // 스크립트 부분에 추가
   const spinner = document.createElement('div');
@@ -164,13 +253,6 @@
   function scrollToBottom() {
     messages.scrollTop = messages.scrollHeight;
   }
-
-  // 메시지 추가 시 호출 (예: userItem, item 추가 후)
-  messages.appendChild(userItem);
-  scrollToBottom();  // 사용자 메시지 후
-  // 'chat message' 이벤트에서도:
-  messages.appendChild(item);
-  scrollToBottom();
 </script>
 
 
