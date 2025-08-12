@@ -112,15 +112,36 @@
   spaceSelect.addEventListener('change', () => socket.emit('switch space', spaceSelect.value));
   socket.on('space switched', (data) => {
     console.log('Switched to', data.name);
-    // 히스토리 로드 및 UI 렌더링
     messages.innerHTML = '';  // 이전 대화 클리어
-    data.history.forEach(msg => {
+    
+    // [핵심 수정] 히스토리 배열 구조 확인 및 렌더링
+    if (!data.history || !Array.isArray(data.history)) {
+      console.warn('[DEBUG] No history data received');
+      messages.innerHTML = '<li>No history available for this space.</li>';
+      return;
+    }
+    
+    // 배열 순회하며 UI 생성
+    data.history.forEach((msg, index) => {
+      if (!msg || !msg.role || !msg.content) {
+        console.warn('[DEBUG] Invalid history item at index', index);
+        return;
+      }
       const item = document.createElement('li');
       const role = msg.role === 'user' ? 'You: ' : 'Gemini: ';
-      item.innerHTML = marked.parse(role + msg.content);  // Markdown 렌더링
+      try {
+        item.innerHTML = marked.parse(role + msg.content);
+      } catch (parseError) {
+        console.error('[DEBUG] Parse error:', parseError);
+        item.textContent = role + msg.content;  // 파싱 실패 시 텍스트만 표시
+      }
       messages.appendChild(item);
     });
-    scrollToBottom();
+    
+    // [개선] 렌더링 후 스크롤 및 지연 보장
+    setTimeout(() => {
+      scrollToBottom();
+    }, 100);  // 이벤트 루프 지연으로 UI 업데이트 보장
   });
 
   // Context 파일 업로드 및 Extract 버튼 이벤트
