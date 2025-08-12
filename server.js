@@ -17,83 +17,91 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+// 안전한 파일명 생성 함수
+function sanitizeFilename(filename) {
+  if (!filename) return 'unnamed_file';
+  try {
+    let decoded = decodeURIComponent(filename);
+    return decoded.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+  } catch (e) {
+    return filename.replace(/[^a-zA-Z0-9._-]/g, '_').trim();
+  }
+}
+
 // 업로드 설정
-// 업로드 설정 (한글 인코딩 개선)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
-    // 한글 파일명 UTF-8 디코딩 처리
-    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    cb(null, Date.now() + '_' + originalName);
-  }
-});
-const upload = multer({ 
-  storage,
-  fileFilter: (req, file, cb) => {
-    // 한글 파일명 UTF-8 처리
-    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    cb(null, true);
+    cb(null, Date.now() + '-' + file.originalname);
   }
 });
 
-// Context 파일 전용 storage 추가
-const contextStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => {
-    // 한글 파일명 UTF-8 디코딩 처리
-    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    cb(null, Date.now() + '_' + originalName);
-  }
-});
-const contextUpload = multer({ 
-  storage: contextStorage,
-  fileFilter: (req, file, cb) => {
-    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    cb(null, true);
-  }
-});
+const upload = multer({ storage });
+const contextUpload = multer({ storage }).array('files', 10);
+
 
 // 정적 파일 서빙
 app.use(express.static('public'));
 
 // 이미지 업로드 라우트
 app.post('/upload', upload.single('image'), (req, res) => {
-  if (!req.file) return res.status(400).send('No file uploaded.');
-  const originalFileName = req.file.originalname;
-  console.log(`✓ Image uploaded: ${originalFileName}`);
-  res.json({ imagePath: req.file.path, fileName: originalFileName });
+    if (!req.file) return res.status(400).send('No file uploaded.');
+    res.json({ imagePath: req.file.path });
 });
 
+app.post('/upload-context', contextUpload, async (req, res) => {
+    try {
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ success: false, error: 'No files uploaded' });
+        }
+        const spaceName = req.body.space || 'default';
+        const spaceContextDir = path.join(__dirname, 'context', spaceName);
+        if (!fs.existsSync(spaceContextDir)) {
+            fs.mkdirSync(spaceContextDir, { recursive: true });
+        }
 
-app.post('/upload-file', upload.single('file'), (req, res) => {
-  const spaceName = req.body.space || 'default';
-  const spaceContextDir = path.join(__dirname, 'context', spaceName);
-  if (!fs.existsSync(spaceContextDir)) fs.mkdirSync(spaceContextDir, { recursive: true });
-  const filePath = path.join(spaceContextDir, req.file.originalname);
-  fs.renameSync(req.file.path, filePath);
-  // 자동 추출 호출 (extractContextFiles(spaceName) 커스텀 버전 필요)
-  res.json({ success: true });
+        const uploadedFiles = [];
+        for (const file of req.files) {
+            const finalFileName = sanitizeFilename(file.originalname);
+            const finalPath = path.join(spaceContextDir, finalFileName);
+            fs.renameSync(file.path, finalPath);
+            uploadedFiles.push(finalFileName);
+            console.log(`✓ File moved: ${finalFileName} to space: ${spaceName}`);
+        }
+
+        const spaceData = loadSpace(spaceName);
+        uploadedFiles.forEach(fileName => {
+            if (!spaceData.files.includes(fileName)) {
+                spaceData.files.push(fileName);
+            }
+        });
+        saveSpace(spaceName, spaceData);
+        
+        await extractContextFiles(spaceName);
+
+        res.json({ success: true, extracted: true, fileNames: uploadedFiles });
+    } catch (err) {
+        console.error(`Upload/Extract error: ${err.message}`);
+        res.status(500).json({ success: false, error: err.message });
+    }
 });
-
-// 추출 폴더 설정
-const extractedDir = path.join(__dirname, 'context', 'extracted');
-if (!fs.existsSync(extractedDir)) fs.mkdirSync(extractedDir, { recursive: true });
 
 const spacesDir = path.join(__dirname, 'spaces');
 if (!fs.existsSync(spacesDir)) fs.mkdirSync(spacesDir);
 
-// Space 로드/저장 헬퍼
 function loadSpace(spaceName) {
-  const spacePath = path.join(spacesDir, `${spaceName}.json`);
-  if (fs.existsSync(spacePath)) {
-    return JSON.parse(fs.readFileSync(spacePath, 'utf-8'));
-  }
-  return { files: [], history: [] };
+    const spacePath = path.join(spacesDir, `${spaceName}.json`);
+    if (fs.existsSync(spacePath)) {
+        try {
+            return JSON.parse(fs.readFileSync(spacePath, 'utf-8'));
+        } catch (e) { return { files: [], history: [] }; }
+    }
+    return { files: [], history: [] };
 }
 
 function saveSpace(spaceName, data) {
-  const spacePath = path.join(spacesDir, `${spaceName}.json`);
-  fs.writeFileSync(spacePath, JSON.stringify(data), 'utf-8');
+    const spacePath = path.join(spacesDir, `${spaceName}.json`);
+    fs.writeFileSync(spacePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
 
@@ -195,116 +203,83 @@ function tableToMarkdown(tableData) {
 
 // 서버 시작 시 ./context 폴더 스캔 및 추출 함수 (확장자별 최적화)
 async function extractContextFiles(spaceName = 'default') {
-  console.log(`🔄 Starting extraction for space: ${spaceName}`);
-  
-  const contextDir = path.join(__dirname, 'context', spaceName);
-  const spaceExtractedDir = path.join(contextDir, 'extracted');
-  
-  console.log(`📂 Context directory: ${contextDir}`);
-  
-  if (!fs.existsSync(contextDir)) {
-    console.log(`❌ No context directory for space: ${spaceName}`);
-    return;
-  }
-  
-  if (!fs.existsSync(spaceExtractedDir)) {
-    fs.mkdirSync(spaceExtractedDir, { recursive: true });
-    console.log(`✓ Created extracted directory: ${spaceExtractedDir}`);
-  }
+    // [핵심 2] 모든 결과물은 Space별 extracted 폴더로 가도록 경로 명확화
+    const contextDir = path.join(__dirname, 'context', spaceName);
+    const extractedDir = path.join(contextDir, 'extracted');
 
-  let files;
-  try {
-    files = fs.readdirSync(contextDir);
-  } catch (err) {
-    console.error(`❌ Cannot read directory ${contextDir}: ${err.message}`);
-    return;
-  }
-  
-  const filesToProcess = files.filter(file => {
-    const filePath = path.join(contextDir, file);
-    try {
-      const stat = fs.statSync(filePath);
-      return stat.isFile() && file !== 'extracted';
-    } catch (err) {
-      console.error(`⚠️  Cannot stat file ${filePath}: ${err.message}`);
-      return false;
+    // 대상 폴더가 없으면 함수 종료
+    if (!fs.existsSync(contextDir)) {
+        console.log(`[Info] Context directory for space "${spaceName}" does not exist. Skipping extraction.`);
+        return;
     }
-  });
-  
-  if (filesToProcess.length === 0) {
-    console.log(`ℹ️  No files to extract in space: ${spaceName}`);
-    return;
-  }
-  
-  console.log(`📁 Found ${filesToProcess.length} files to process in ${spaceName}:`, filesToProcess);
-  
-  for (const file of filesToProcess) {
-    const filePath = path.join(contextDir, file);
-    const ext = path.extname(file).toLowerCase();
-    const extractedPath = path.join(spaceExtractedDir, `${path.basename(file, ext)}_extracted.txt`);
+    // 추출 폴더가 없으면 생성
+    if (!fs.existsSync(extractedDir)) {
+        fs.mkdirSync(extractedDir, { recursive: true });
+    }
 
-    console.log(`🔍 Processing: ${file} (${ext})`);
-    console.log(`📍 Full path: ${filePath}`);
+    // 디렉토리 내의 파일 목록을 가져오되, 'extracted' 하위 디렉토리는 제외
+    const files = fs.readdirSync(contextDir).filter(f => {
+        const filePath = path.join(contextDir, f);
+        return fs.statSync(filePath).isFile();
+    });
+
+    if (files.length === 0) {
+        console.log(`[Info] No files to extract in space "${spaceName}".`);
+        return;
+    }
+
+    console.log(`[Info] Starting extraction for ${files.length} file(s) in space "${spaceName}"...`);
     
-    // 파일 존재 확인
-    if (!fs.existsSync(filePath)) {
-      console.error(`❌ File not found: ${filePath}`);
-      continue;
+    for (const file of files) {
+        const filePath = path.join(contextDir, file);
+        const ext = path.extname(file).toLowerCase();
+        // 모든 결과 파일은 extractedDir에 "_extracted.txt" 접미사를 붙여 저장
+        const extractedPath = path.join(extractedDir, `${path.basename(file, ext)}_extracted.txt`);
+        
+        try {
+            // .txt, .md 파일도 extracted 폴더로 '복사'하여 위치 일원화
+            if (['.txt', '.md'].includes(ext)) {
+                fs.copyFileSync(filePath, extractedPath);
+            } else if (ext === '.pdf') {
+                const data = await pdfParse(fs.readFileSync(filePath));
+                fs.writeFileSync(extractedPath, data.text, 'utf-8');
+            } else if (['.jpg', '.png', '.jpeg'].includes(ext)) {
+                const metadata = await sharp(filePath).metadata();
+                fs.writeFileSync(extractedPath, `Image: ${file}\nDimensions: ${metadata.width}x${metadata.height}`, 'utf-8');
+            } else if (ext === '.csv') {
+                const rows = [];
+                await new Promise((resolve, reject) => {
+                    fs.createReadStream(filePath)
+                      .pipe(csvParser())
+                      .on('data', (row) => rows.push(Object.values(row)))
+                      .on('end', resolve)
+                      .on('error', reject);
+                });
+                fs.writeFileSync(extractedPath, tableToMarkdown(rows), 'utf-8');
+            } else if (ext === '.xlsx') {
+                const workbook = XLSX.readFile(filePath);
+                let text = '';
+                workbook.SheetNames.forEach(sheetName => {
+                    const sheetData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
+                    text += `Sheet: ${sheetName}\n${tableToMarkdown(sheetData)}\n\n`;
+                });
+                fs.writeFileSync(extractedPath, text, 'utf-8');
+            } else if (ext === '.docx') {
+                const { value } = await mammoth.convertToMarkdown({ path: filePath });
+                fs.writeFileSync(extractedPath, value, 'utf-8');
+            } else if (ext === '.hwpx') {
+                await extractHwpx(filePath, extractedPath); // HWPX 전용 추출 함수 호출
+            } else {
+                continue; // 지원하지 않는 확장자는 건너뜀
+            }
+            console.log(`✓ Extracted: ${file} -> ${path.basename(extractedPath)}`);
+        } catch (err) {
+            console.error(`✗ Extract error for ${file}: ${err.message}`);
+        }
     }
-
-    try {
-      if (['.txt', '.md'].includes(ext)) {
-        fs.copyFileSync(filePath, extractedPath);
-        console.log(`✅ Extracted text file: ${file}`);
-      } else if (ext === '.pdf') {
-        const dataBuffer = fs.readFileSync(filePath);
-        const data = await pdfParse(dataBuffer);
-        fs.writeFileSync(extractedPath, data.text, 'utf-8');
-        console.log(`✅ Extracted PDF: ${file}`);
-      } else if (['.jpg', '.png', '.jpeg'].includes(ext)) {
-        const metadata = await sharp(filePath).metadata();
-        const text = `Image: ${file}\nDimensions: ${metadata.width}x${metadata.height}\nFormat: ${metadata.format}`;
-        fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`✅ Extracted Image: ${file}`);
-      } else if (ext === '.csv') {
-        let rows = [];
-        await new Promise((resolve, reject) => {
-          fs.createReadStream(filePath)
-            .pipe(csvParser())
-            .on('data', row => rows.push(row))
-            .on('end', resolve)
-            .on('error', reject);
-        });
-        const text = tableToMarkdown(rows);
-        fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`✅ Extracted CSV: ${file}`);
-      } else if (ext === '.xlsx') {
-        const workbook = XLSX.readFile(filePath);
-        let text = '';
-        workbook.SheetNames.forEach(sheetName => {
-          const sheet = XLSX.utils.sheet_to_csv(workbook.Sheets[sheetName]);
-          text += `Sheet: ${sheetName}\n${sheet}\n\n`;
-        });
-        fs.writeFileSync(extractedPath, text, 'utf-8');
-        console.log(`✅ Extracted XLSX: ${file}`);
-      } else if (ext === '.docx') {
-        const result = await mammoth.convertToMarkdown({ path: filePath });
-        fs.writeFileSync(extractedPath, result.value, 'utf-8');
-        console.log(`✅ Extracted DOCX: ${file}`);
-      } else if (ext === '.hwpx') {
-        await extractHwpx(filePath, extractedPath);
-        console.log(`✅ Extracted HWPX: ${file}`);
-      } else {
-        console.log(`⚠️  Skipping unsupported: ${file} (${ext})`);
-      }
-    } catch (err) {
-      console.error(`❌ Extract error for ${file}: ${err.message}`);
-      console.error(`📍 Error details:`, err);
-    }
-  }
-  
-  console.log(`🎉 Extraction completed for space: ${spaceName}`);
+    console.log(`[Success] Extraction completed for space "${spaceName}".`);
 }
+
 
 
 
@@ -315,29 +290,19 @@ async function extractContextFiles(spaceName = 'default') {
 })();
 
 // getContext 함수 수정 (Space별 격리)
-function getContext(spaceName = 'default') {
-  let context = '';
-  const spaceExtractedDir = path.join(__dirname, 'context', spaceName, 'extracted');
-  if (fs.existsSync(spaceExtractedDir)) {
-    const files = fs.readdirSync(spaceExtractedDir);
-    files.forEach(file => {
-      const filePath = path.join(spaceExtractedDir, file);
-      if (fs.statSync(filePath).isFile() && path.extname(file) === '.txt') {
-        try {
-          context += fs.readFileSync(filePath, 'utf-8') + '\n\n';
-        } catch (err) {
-          console.error(`Error reading extracted ${file} in ${spaceName}: ${err.message}`);
-        }
-      }
-    });
-  } else {
-    console.warn(`No extracted dir for space: ${spaceName}`);
-  }
-  return context;
+function getContext(spaceName = 'default') {    
+    const extractedDir = path.join(__dirname, 'context', spaceName, 'extracted');
+    let context = '';
+    if (fs.existsSync(extractedDir)) {
+        const files = fs.readdirSync(extractedDir);
+        files.forEach(file => {
+            context += fs.readFileSync(path.join(extractedDir, file), 'utf-8') + '\n\n';
+        });
+    }
+    return context;
 }
 
-// 세션 히스토리 저장
-const sessionHistories = new Map();
+
 
 // Sequential Thinking MCP 템플릿
 const sequentialThinkingTemplate = `
@@ -350,39 +315,58 @@ Step 4: 논리적이고 도움이 되는 응답을 생성해. 응답은 친절�
 
 // Space 목록 헬퍼 추가 (spacesDir 스캔)
 function getSpaceList() {
-  if (!fs.existsSync(spacesDir)) return [];
-  return fs.readdirSync(spacesDir).map(f => f.replace('.json', ''));
+    if (!fs.existsSync(spacesDir)) return ['default'];
+    const spaces = fs.readdirSync(spacesDir).map(f => f.replace('.json', ''));
+    return spaces.length > 0 ? spaces : ['default'];
 }
 
-const currentSpace = new Map();  // socket.id별 현재 Space 추적 (추가)
+// 3. API 호출 속도 조절을 위한 Debounce 로직
+const extractionDebouncers = new Map();
+function debounceExtract(spaceName, delay = 2000) {
+    if (extractionDebouncers.has(spaceName)) {
+        clearTimeout(extractionDebouncers.get(spaceName));
+    }
+    const timerId = setTimeout(() => {
+        console.log(`⏳ Debounced extraction starting for: ${spaceName}`);
+        extractContextFiles(spaceName).catch(err => console.error(`Debounced extraction failed for ${spaceName}: ${err.message}`));
+        extractionDebouncers.delete(spaceName);
+    }, delay);
+    extractionDebouncers.set(spaceName, timerId);
+}
+
+const currentSpace = new Map();  
+const sessionHistories = new Map();
 
 io.on('connection', (socket) => {
+  currentSpace.set(socket.id, 'default');
   sessionHistories.set(socket.id, []);
-  currentSpace.set(socket.id, 'default');  // 연결 시 default Space 초기화 (추가)
 
   socket.on('chat message', ({ prompt, imagePath }) => {
     socket.emit('thinking');
 
+    const currentSpaceName = currentSpace.get(socket.id) || 'default';
     let history = sessionHistories.get(socket.id) || [];
     const userMessage = prompt || '이 이미지를 분석해 주세요.';
     history.push({ role: 'user', content: userMessage });
     if (history.length > 10) history = history.slice(-10);
 
-    let fullPrompt = sequentialThinkingTemplate + '\n\n';
-    fullPrompt += getContext(currentSpace.get(socket.id) || 'default') + '\n\n';  // Space-specific context
-    fullPrompt += '대화 히스토리:\n' + history.map(msg => `${msg.role}: ${msg.content}`).join('\n') + '\n\n';
+    // [핵심 수정] 프롬프트 구조화
+    const contextData = getContext(currentSpaceName);
+    let fullPrompt = sequentialThinkingTemplate + '\n\n---\n\n';
+    fullPrompt += '### 참고 자료 (Context)\n';
+    fullPrompt += '다음은 사용자가 제공한 파일에서 추출된 내용입니다. 답변의 주요 근거로 사용하세요.\n';
+    fullPrompt += contextData ? contextData : '제공된 참고 자료가 없습니다.\n';
+    fullPrompt += '\n---\n\n';
+    fullPrompt += '### 대화 기록\n';
+    fullPrompt += history.map(msg => `${msg.role}: ${msg.content}`).join('\n') + '\n';
+    fullPrompt += `user: ${userMessage}\n`;
     if (imagePath) fullPrompt += ` [이미지 파일: ${imagePath}]`;
     fullPrompt = fullPrompt.trim();
 
     const tempFilePath = path.join(__dirname, 'temp_prompt.txt');
     fs.writeFileSync(tempFilePath, fullPrompt, 'utf-8');
 
-    const command = [
-      'gemini',
-      '-m', 'gemini-2.5-pro',
-      '-p', `@${tempFilePath}`
-    ];
-
+    const command = ['gemini', '-m', 'gemini-2.5-pro', '-p', `@${tempFilePath}`];
     const geminiProcess = spawn(command[0], command.slice(1));
 
     let response = '';
@@ -419,51 +403,26 @@ io.on('connection', (socket) => {
 
   });
 
-  socket.on('switch space', async (spaceName) => {
-    currentSpace.set(socket.id, spaceName);
-    const spaceData = loadSpace(spaceName);
-    sessionHistories.set(socket.id, spaceData.history || []);
-    console.log(`Switched ${socket.id} to ${spaceName}: History reset to ${(spaceData.history || []).length} items`);
-    
-    // Space 전환 시 자동 Extract 실행 (파일이 있으면)
-    const spaceContextDir = path.join(__dirname, 'context', spaceName);
-    if (fs.existsSync(spaceContextDir)) {
-      try {
-        await extractContextFiles(spaceName);
-        console.log(`Auto-extraction completed for space: ${spaceName}`);
-      } catch (err) {
-        console.error(`Auto-extraction failed for ${spaceName}: ${err.message}`);
-      }
-    }
-    
-    socket.emit('space switched', { 
-      name: spaceName, 
-      files: spaceData.files || [], 
-      history: spaceData.history || [] 
-    });
+  socket.on('switch space', (spaceName) => {
+      currentSpace.set(socket.id, spaceName);
+      const spaceData = loadSpace(spaceName);
+      sessionHistories.set(socket.id, spaceData.history || []);
+      socket.emit('space switched', { name: spaceName, files: spaceData.files || [], history: spaceData.history || [] });
+      debounceExtract(spaceName); // 전환 시 Debounce된 추출 호출
   });
-
 
 
   socket.on('list spaces', () => {
     socket.emit('space list', getSpaceList());
   });
 
-  socket.on('add space', async (spaceName) => {
-    if (spaceName) {
-      saveSpace(spaceName, { files: [], history: [] });
-      
-      // 새 Space 생성 후 자동 Extract 실행
-      try {
-        await extractContextFiles(spaceName);
-        console.log(`Auto-extraction completed for new space: ${spaceName}`);
-      } catch (err) {
-        console.error(`Auto-extraction failed for ${spaceName}: ${err.message}`);
+  socket.on('add space', (spaceName) => {
+      if (spaceName) {
+          saveSpace(spaceName, { files: [], history: [] });
+          io.emit('space list', getSpaceList());
       }
-      
-      io.emit('space list', getSpaceList());
-    }
   });
+
 
   socket.on('delete space', (spaceName) => {
     if (spaceName === 'default') {
@@ -493,79 +452,33 @@ io.on('connection', (socket) => {
   });
 
   socket.on('delete file', ({ spaceName, fileName }) => {
-    const spaceData = loadSpace(spaceName);
-    spaceData.files = spaceData.files.filter(f => f !== fileName);
-    saveSpace(spaceName, spaceData);
-    socket.emit('file deleted', fileName);
+      try {
+          const spaceData = loadSpace(spaceName);
+          spaceData.files = spaceData.files.filter(f => f !== fileName);
+          saveSpace(spaceName, spaceData);
+
+          // 1. 원본 파일 삭제
+          const originalFilePath = path.join(__dirname, 'context', spaceName, fileName);
+          if (fs.existsSync(originalFilePath)) {
+              fs.unlinkSync(originalFilePath);
+              console.log(`✓ Deleted original file: ${originalFilePath}`);
+          }
+
+          // 2. 추출된 .txt 파일 삭제
+          const extractedFileName = `${path.basename(fileName, path.extname(fileName))}_extracted.txt`;
+          const extractedFilePath = path.join(__dirname, 'context', spaceName, 'extracted', extractedFileName);
+          if (fs.existsSync(extractedFilePath)) {
+              fs.unlinkSync(extractedFilePath);
+              console.log(`✓ Deleted extracted file: ${extractedFilePath}`);
+          }
+          
+          // 클라이언트에 파일 목록 업데이트 알림
+          io.to(socket.id).emit('file list', spaceData.files);
+
+      } catch (error) {
+          console.error(`Failed to delete file ${fileName} in space ${spaceName}:`, error);
+      }
   });
-
- app.post('/upload-context', contextUpload.single('file'), async (req, res) => {
-  try {
-    const spaceName = req.body.space || 'default';
-    const spaceContextDir = path.join(__dirname, 'context', spaceName);
-    
-    console.log(`📤 Upload request for space: ${spaceName}`);
-    console.log(`📂 Target directory: ${spaceContextDir}`);
-    
-    if (!fs.existsSync(spaceContextDir)) {
-      fs.mkdirSync(spaceContextDir, { recursive: true });
-      console.log(`✓ Created directory: ${spaceContextDir}`);
-    }
-    
-    // 한글 파일명으로 최종 경로 설정
-    const originalFileName = req.file.originalname;
-    const finalPath = path.join(spaceContextDir, originalFileName);
-    
-    console.log(`📋 Original filename: ${originalFileName}`);
-    console.log(`📍 Temp file: ${req.file.path}`);
-    console.log(`📍 Final path: ${finalPath}`);
-    
-    // 업로드된 임시 파일을 최종 위치로 이동
-    fs.renameSync(req.file.path, finalPath);
-    console.log(`✓ File moved: ${originalFileName} to space: ${spaceName}`);
-    
-    // 파일 존재 확인
-    if (!fs.existsSync(finalPath)) {
-      throw new Error(`File was not created at expected location: ${finalPath}`);
-    }
-    
-    // Space 데이터에 파일 목록 업데이트
-    const spaceData = loadSpace(spaceName);
-    if (!spaceData.files.includes(originalFileName)) {
-      spaceData.files.push(originalFileName);
-      saveSpace(spaceName, spaceData);
-      console.log(`✓ File list updated for space: ${spaceName}`);
-    }
-    
-    // 잠시 대기 (파일 시스템 동기화)
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    // 파일 업로드 후 즉시 Extract 실행
-    console.log(`🔄 Starting auto-extraction for space: ${spaceName}`);
-    await extractContextFiles(spaceName);
-    console.log(`✓ Auto-extraction completed for space: ${spaceName}`);
-    
-    res.json({ 
-      success: true, 
-      extracted: true, 
-      fileName: originalFileName,
-      message: 'File uploaded and extracted successfully' 
-    });
-    
-  } catch (err) {
-    console.error(`❌ Upload/Extract error: ${err.message}`);
-    console.error(`📍 Error stack:`, err.stack);
-    res.status(500).json({ 
-      success: false, 
-      extracted: false, 
-      error: err.message 
-    });
-  }
-});
-
-
-
-
 
   socket.on('extract context', async (spaceName) => {
     try {
@@ -577,9 +490,6 @@ io.on('connection', (socket) => {
       socket.emit('extraction error', err.message);
     }
   });
-
-
-
 
   socket.on('disconnect', () => {
     sessionHistories.delete(socket.id);
